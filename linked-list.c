@@ -1,5 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
+
+pthread_mutex_t lock;
 
 typedef struct Node {
     int data;
@@ -24,6 +27,8 @@ Node* create_node(int data) {
  * Insert a node at the first position
  */
 Node* insert_begin(Node* head, int data) {
+    pthread_mutex_lock(&lock);
+
     Node* new_node = create_node(data);
     new_node->next = head;
     return new_node;
@@ -33,6 +38,8 @@ Node* insert_begin(Node* head, int data) {
  * Insert a node at the last position
  */
 Node* insert_end(Node* head, int data) {
+    pthread_mutex_lock(&lock);
+
     Node* new_node = create_node(data);
     if (head == NULL) {
         return new_node;
@@ -49,6 +56,8 @@ Node* insert_end(Node* head, int data) {
  * Inserts a new node after a given node
  */
 void insert_after(Node* prev_node, int data) {
+    pthread_mutex_lock(&lock);
+
     if (prev_node == NULL) {
         printf("node is null\n");
         return;
@@ -62,6 +71,8 @@ void insert_after(Node* prev_node, int data) {
  * Deletes a given node
  */
 Node* delete_node(Node* head, int data) {
+    pthread_mutex_lock(&lock);
+
     if (head == NULL) {
         printf("empty list\n");
         return NULL;
