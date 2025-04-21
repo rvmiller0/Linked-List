@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <stdbool.h>
 
-pthread_mutex_t lock;
+pthread_rwlock_t list_rwlock = PTHREAD_RWLOCK_INITIALIZER; // Global reader-writer lock for thread synchronization
+// Used rw lock to try to solve sync issues, turns out the real reason was bad pointer control.  Leaving it like this because it still works
 
 typedef struct Node {
     int data;
@@ -26,101 +28,88 @@ Node* create_node(int data) {
 /**
  * Insert a node at the first position
  */
-Node* insert_begin(Node* head, int data) {
-    pthread_mutex_lock(&lock);
+void insert_node(Node** head_ref, int data) {
+    pthread_rwlock_wrlock(&list_rwlock);
+    
+    Node *new_node = create_node(data);
+    new_node->next = *head_ref;
+    *head_ref      = new_node;   // update head while still locked - important!   
 
-    Node* new_node = create_node(data);
-    new_node->next = head;
-    return new_node;
-}
-
-/**
- * Insert a node at the last position
- */
-Node* insert_end(Node* head, int data) {
-    pthread_mutex_lock(&lock);
-
-    Node* new_node = create_node(data);
-    if (head == NULL) {
-        return new_node;
-    }
-    Node* cur = head;
-    while (cur->next != NULL) {
-        cur = cur->next;
-    }
-    cur->next = new_node;
-    return head;
-}
-
-/**
- * Inserts a new node after a given node
- */
-void insert_after(Node* prev_node, int data) {
-    pthread_mutex_lock(&lock);
-
-    if (prev_node == NULL) {
-        printf("node is null\n");
-        return;
-    }
-    Node* new_node = create_node(data);
-    new_node->next = prev_node->next;
-    prev_node->next = new_node;
+    pthread_rwlock_unlock(&list_rwlock);
 }
 
 /**
  * Deletes a given node
  */
-Node* delete_node(Node* head, int data) {
-    pthread_mutex_lock(&lock);
+void delete_node(Node **head_ref, int data) {
+    pthread_rwlock_wrlock(&list_rwlock); // writers have exclusive access
 
-    if (head == NULL) {
-        printf("empty list\n");
-        return NULL;
+
+    Node *head = *head_ref;
+    if (head == NULL) { // empty list
+        pthread_rwlock_unlock(&list_rwlock);
+        return;
     }
-    if (head->data == data) {
-        Node* temp = head;
-        head = head->next;
+
+    if (head->data == data) { // delete head
+
+        Node *temp = head;
+        *head_ref  = head->next;   // update head while locked
         free(temp);
-        return head;
+        pthread_rwlock_unlock(&list_rwlock);
+        return;
     }
-    Node* cur = head;
-    Node* prev = NULL;
+    Node *prev = head;
+    Node *cur  = head->next;
 
     while (cur != NULL && cur->data != data) {
         prev = cur;
-        cur = cur->next;
+        cur  = cur->next;
     }
 
-    if (cur == NULL) {
-        printf("dnf\n");
-        return head;
+    if (cur != NULL) {
+        prev->next = cur->next;
+        free(cur);
     }
-
-    prev->next = cur->next;
-    free(cur);
-    return(head);
+    pthread_rwlock_unlock(&list_rwlock);
 }
 
 /**
- * Returns a given node
+ * Returns a given node, uses read lock instead of write lock
+ * since it doesn't modify the list
  */
 Node* search(Node* head, int data) {
+    pthread_rwlock_rdlock(&list_rwlock);
+    
     Node* cur = head;
     while (cur != NULL) {
         if (cur->data == data) {
+            pthread_rwlock_unlock(&list_rwlock);
             return cur;
         }
         cur = cur->next;
     }
+    
+    pthread_rwlock_unlock(&list_rwlock);
     return NULL;    
+}
+
+/**
+ * Checks if a value exists in the list
+ */
+bool contains(Node* head, int data) {
+    return search(head, data) != NULL;
 }
 
 /**
  * Prints list contents
  */
-void printLL(struct Node* head){
+void print_list(Node* head) {
+    pthread_rwlock_rdlock(&list_rwlock);
+    
     if (head == NULL) {
-        printf("empty list");
+        printf("empty list\n");
+        pthread_rwlock_unlock(&list_rwlock);
         return;
     }
 
@@ -130,19 +119,42 @@ void printLL(struct Node* head){
         printf("%d -> ", cur->data);
         cur = cur->next;
     }
-    printf("endL\n");
+    printf("END\n");
+    
+    pthread_rwlock_unlock(&list_rwlock);
 }
 
 /**
- * Tests list
+ * Count nodes in list
  */
-int main(){
-    Node* head = NULL;
+int count_nodes(Node* head) {
+    pthread_rwlock_rdlock(&list_rwlock);
+    
+    int count = 0;
+    Node* cur = head;
+    while (cur != NULL) {
+        count++;
+        cur = cur->next;
+    }
+    
+    pthread_rwlock_unlock(&list_rwlock);
+    return count;
+}
 
-    head = insert_begin(head, 10);
-    head = insert_begin(head, 5);
-    head = insert_end(head, 20);
-    Node* second = head->next;
-    insert_after(second, 15);
-    printLL(head);
+/**
+ * Free memory used by the list
+ */
+void free_list(Node* head) {
+    pthread_rwlock_wrlock(&list_rwlock);
+    
+    Node* current = head;
+    Node* next;
+    
+    while (current != NULL) {
+        next = current->next;
+        free(current);
+        current = next;
+    }
+    
+    pthread_rwlock_unlock(&list_rwlock);
 }
