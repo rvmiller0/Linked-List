@@ -6,7 +6,17 @@
 typedef struct Node {
     int data;
     struct Node* next;
+    bool marked;
 } Node;
+
+// this may be unnecessary
+bool CAS(int original, int expected, int update){
+    if (original == expected){
+        original = update;
+        return true;
+    }
+    return false;
+}
 
 /**
  * Allocates and creates a new node object
@@ -19,7 +29,15 @@ Node* create_node(int data) {
     }
     new_node->data = data;
     new_node->next = NULL;
+    new_node->marked = false;
     return new_node;
+}
+
+/**
+ * Checks if the two given nodes are unmarked and connected
+*/
+bool nodes_safe(Node* prev, Node* cur){
+    return (!prev->marked && !cur->marked) && prev->next == cur;
 }
 
 /**
@@ -27,13 +45,21 @@ Node* create_node(int data) {
  */
 void insert_node(Node** head_ref, int data) {
     Node *new_node = create_node(data);
-    new_node->next = *head_ref;
-    *head_ref      = new_node;   // update head while still locked - important!
+    while(true) {
+        if(nodes_safe(*head_ref, (*head_ref)->next)){
+            new_node->next = *head_ref;
+            *head_ref = new_node;
+            break;
+        }
+    }
 }
 
 /**
  * Deletes a given node
  */
+
+
+// should this be a bool to return success or failure?
 void delete_node(Node **head_ref, int data) {
     Node *head = *head_ref;
     if (head == NULL) { // empty list
@@ -41,7 +67,6 @@ void delete_node(Node **head_ref, int data) {
     }
 
     if (head->data == data) { // delete head
-
         Node *temp = head;
         *head_ref  = head->next;   // update head while locked
         free(temp);
@@ -56,14 +81,24 @@ void delete_node(Node **head_ref, int data) {
     }
 
     if (cur != NULL) {
-        prev->next = cur->next;
-        free(cur);
+        if(nodes_safe(prev, cur)){
+            if (cur->data == data){
+                cur->marked = 1;
+                prev->next = cur->next;
+                free(cur);
+                return; // success
+            }
+            else{
+                return; // failure
+            }
+        }
     }
+
+    return;           // failure
 }
 
 /**
- * Returns a given node, uses read lock instead of write lock
- * since it doesn't modify the list
+ * Returns a given node
  */
 Node* search(Node* head, int data) {
     Node* cur = head;
@@ -81,7 +116,10 @@ Node* search(Node* head, int data) {
  * Checks if a value exists in the list
  */
 bool contains(Node* head, int data) {
-    return search(head, data) != NULL;
+    Node* target = search(head, data);
+    if (target == NULL)
+        return false;
+    return !target->marked; // if target is marked, we consider it missing
 }
 
 /**
