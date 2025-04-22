@@ -4,26 +4,25 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include "lock-free.c"
 
-#define NUM_THREADS 4
-#define OPERATIONS_PER_THREAD 1000
+#define NUM_THREADS 8
+#define OPERATIONS_PER_THREAD 10000
 #define VALUE_RANGE 1000
 
-pthread_rwlock_t list_rwlock = PTHREAD_RWLOCK_INITIALIZER;
+// Global atomic head pointer
+_Atomic(Node*) head = NULL;
 
-Node* head = NULL; // Global head pointer
-
-// Better tracking of expected values - use a simple hash table
+// Keep track of expected values using atomic operations
 #define BUCKET_SIZE (VALUE_RANGE + 1)
 typedef struct {
     int value;
-    int count;  // Track how many times this value should be in the list
-    bool used;  // Flag to indicate if this bucket is used
+    _Atomic int count;  // Track how many times this value should be in the list
+    _Atomic bool used;  // Flag to indicate if this bucket is used
 } ValueCounter;
 
 ValueCounter* expected_values;
-pthread_mutex_t expected_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**
  * Thread struct
@@ -34,7 +33,7 @@ typedef struct {
 } ThreadArg;
 
 /**
- * Initialize the expected values array (hash table)
+ * Initialize the expected values array
  */
 void init_expected_values() {
     expected_values = calloc(BUCKET_SIZE, sizeof(ValueCounter));
@@ -42,45 +41,48 @@ void init_expected_values() {
         perror("calloc failed for expected_values");
         exit(EXIT_FAILURE);
     }
+
+    // Initialize atomic variables
+    for (int i = 0; i < BUCKET_SIZE; i++) {
+        atomic_init(&expected_values[i].count, 0);
+        atomic_init(&expected_values[i].used, false);
+    }
 }
 
 /**
- * Add value to the expected values
+ * Lock free add value to the expected value
  */
 void add_expected(int value) {
-    pthread_mutex_lock(&expected_mutex);
     expected_values[value].value = value;
-    expected_values[value].count++;
-    expected_values[value].used = true;
-    pthread_mutex_unlock(&expected_mutex);
+    atomic_fetch_add(&expected_values[value].count, 1);
+    atomic_store(&expected_values[value].used, true);
 }
 
 /**
- * Remove value from expected values
+ * Lock free remove value from expected values - 
  */
 void remove_expected(int value) {
-    pthread_mutex_lock(&expected_mutex);
-    if (expected_values[value].used && expected_values[value].count > 0) {
-        expected_values[value].count--;
-        if (expected_values[value].count == 0) {
-            expected_values[value].used = false;
+    if (atomic_load(&expected_values[value].used) && 
+        atomic_load(&expected_values[value].count) > 0) {
+        
+        int old_count = atomic_fetch_sub(&expected_values[value].count, 1);
+        
+        if (old_count == 1) {
+            atomic_store(&expected_values[value].used, false);
         }
     }
-    pthread_mutex_unlock(&expected_mutex);
 }
 
 /**
- * Get the total count of expected values
+ * Lock free get the total count of expected values
  */
 int get_expected_count() {
-    pthread_mutex_lock(&expected_mutex);
     int total = 0;
     for (int i = 0; i < BUCKET_SIZE; i++) {
-        if (expected_values[i].used) {
-            total += expected_values[i].count;
+        if (atomic_load(&expected_values[i].used)) {
+            total += atomic_load(&expected_values[i].count);
         }
     }
-    pthread_mutex_unlock(&expected_mutex);
     return total;
 }
 
@@ -92,7 +94,7 @@ void* thread_function(void* arg) {
     int thread_id = thread_arg->thread_id;
     unsigned int seed = thread_arg->seed;
     
-    printf("thread %d start\n", thread_id);
+    printf("Thread %d starting\n", thread_id);
     
     for (int i = 0; i < OPERATIONS_PER_THREAD; i++) {
         int operation = rand_r(&seed) % 3;
@@ -100,17 +102,21 @@ void* thread_function(void* arg) {
         
         switch (operation) {
             case 0: // Insert
-                insert_node(&head, value);
+                insert_begin(&head, value);
                 add_expected(value);
                 break;
+                
             case 1: // Delete
-                delete_node(&head, value);
-                remove_expected(value);
+                if (delete_node(&head, value)) {
+                    remove_expected(value);
+                }
                 break;
+                
             case 2: // Search
-                search(head, value);
+                search(&head, value);
                 break;
         }
+        
         // Delay to cause thread interleaving
         if (rand_r(&seed) % 100 == 0) {
             usleep(1);
@@ -122,52 +128,47 @@ void* thread_function(void* arg) {
 }
 
 /**
- * Comprehensive verification
+ * Verification function to check list integrity
  */
 bool verify_list() {
     printf("verifying integrity...\n");
-    bool result = true;
     
-    // First, count actual nodes in the list
-    int actual_count = count_nodes(head);
-    
-    // Get expected count from our tracking
-    int expected_count = get_expected_count();
-    
+    int actual_count = count_nodes(&head); // Count actual nodes in list
+    int expected_count = get_expected_count(); // Get expected count from tracker
+
     // Compare counts first
     printf("node counts: actual=%d, expected=%d\n", actual_count, expected_count);
     if (actual_count != expected_count) {
         printf("verification fail: count mismatch\n");
-        result = false;
+        return false;
     }
-    
-    // Now check each expected value is in the list the correct number of times
-    pthread_mutex_lock(&expected_mutex);
-    
-    // 1. Count occurrences of each value in the list
+        
+    // Count occurrences of each value in list
     int* list_counts = calloc(BUCKET_SIZE, sizeof(int));
     if (list_counts == NULL) {
         perror("calloc failed for list_counts");
-        pthread_mutex_unlock(&expected_mutex);
         return false;
     }
     
-    pthread_rwlock_rdlock(&list_rwlock);
-    Node* current = head;
+    Node* current = atomic_load(&head);
     while (current != NULL) {
-        if (current->data >= 0 && current->data < BUCKET_SIZE) {
-            list_counts[current->data]++;
-        } else {
-            printf("verification fail: value %d out of expected range\n", current->data);
-            result = false;
+        if (!atomic_load(&current->marked)) {
+            if (current->data >= 0 && current->data < BUCKET_SIZE) {
+                list_counts[current->data]++;
+            } else {
+                printf("verification fail: value %d out of expected range\n", current->data);
+                free(list_counts);
+                return false;
+            }
         }
-        current = current->next;
+        current = atomic_load(&current->next);
     }
-    pthread_rwlock_unlock(&list_rwlock);
     
-    // 2. Compare with expected counts
+    // Compare with expected
+    bool result = true;
     for (int i = 0; i < BUCKET_SIZE; i++) {
-        int expected = expected_values[i].used ? expected_values[i].count : 0;
+        int expected = atomic_load(&expected_values[i].used) ? 
+                     atomic_load(&expected_values[i].count) : 0;
         if (list_counts[i] != expected) {
             printf("verification fail: value %d - found %d times, expected %d times\n", 
                    i, list_counts[i], expected);
@@ -176,26 +177,20 @@ bool verify_list() {
     }
     
     free(list_counts);
-    pthread_mutex_unlock(&expected_mutex);
-    
     return result;
 }
 
-/**
- * Runs the tests
- */
 int main() {
     srand(time(NULL)); // Initialize random seed
-
-    // Initialize expected values array
-    init_expected_values();
+    init_expected_values(); // Initialize expected values array
+    atomic_init(&head, NULL); // Initialize atomic head
     
     // Create threads
     pthread_t threads[NUM_THREADS];
     ThreadArg thread_args[NUM_THREADS];
     
-    printf("starting %d threads w/ %d operations each\n", NUM_THREADS, OPERATIONS_PER_THREAD);
-    
+    printf("starting %d threads with %d operations each\n", NUM_THREADS, OPERATIONS_PER_THREAD);
+        
     for (int i = 0; i < NUM_THREADS; i++) {
         thread_args[i].thread_id = i;
         thread_args[i].seed = rand();
@@ -214,11 +209,11 @@ int main() {
         }
     }
     
-    printf("all threads complete\n");
+    printf("all threads complet\n");
     
-    // Print the final list
+    // Print final list
     printf("Final ");
-    print_list(head);
+    print_list(&head);
     
     // Verify integrity
     if (verify_list()) {
@@ -228,7 +223,7 @@ int main() {
     }
     
     // Clean up
-    free_list(head);
+    free_list(&head);
     free(expected_values);
     
     return 0;

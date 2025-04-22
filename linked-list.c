@@ -147,14 +147,13 @@ int count_nodes(Node* head) {
 void free_list(Node* head) {
     pthread_rwlock_wrlock(&list_rwlock);
     
-    Node* current = head;
+    Node* cur = head;
     Node* next;
     
-    while (current != NULL) {
-        next = current->next;
-        free(current);
-        current = next;
+    while (cur != NULL) {
+        next = cur->next;
+        free(cur);
+        cur = next;
     }
-    
     pthread_rwlock_unlock(&list_rwlock);
 }

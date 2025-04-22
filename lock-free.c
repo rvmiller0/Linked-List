@@ -2,21 +2,15 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdatomic.h>
 
+// Define the Node structure with atomic next pointer
 typedef struct Node {
     int data;
-    struct Node* next;
-    bool marked;
+    _Atomic(struct Node*) next;
+    _Atomic bool marked;  // Flag for logical deletion
 } Node;
-
-// this may be unnecessary
-bool CAS(int original, int expected, int update){
-    if (original == expected){
-        original = update;
-        return true;
-    }
-    return false;
-}
 
 /**
  * Allocates and creates a new node object
@@ -28,104 +22,142 @@ Node* create_node(int data) {
         exit(1);
     }
     new_node->data = data;
-    new_node->next = NULL;
-    new_node->marked = false;
+    atomic_store(&new_node->next, NULL); // Atomicity for protection
+    atomic_store(&new_node->marked, false);
     return new_node;
 }
 
 /**
- * Checks if the two given nodes are unmarked and connected
-*/
-bool nodes_safe(Node* prev, Node* cur){
-    return (!prev->marked && !cur->marked) && prev->next == cur;
-}
-
-/**
- * Insert a node at the first position
+ * Lock-free insert a node at the first position
  */
-void insert_node(Node** head_ref, int data) {
-    Node *new_node = create_node(data);
-    while(true) {
-        if(nodes_safe(*head_ref, (*head_ref)->next)){
-            new_node->next = *head_ref;
-            *head_ref = new_node;
-            break;
+Node* insert_begin(_Atomic(Node*) *head_ptr, int data) {
+    Node* new_node = create_node(data);
+    Node* expected;
+    
+    do {
+        expected = atomic_load(head_ptr);
+        atomic_store(&new_node->next, expected);
+    } while (!atomic_compare_exchange_strong(head_ptr, &expected, new_node)); // Compare and swap like slides
+    
+    return new_node;
+}
+/**
+ * Find a node, helper for deletion
+ */
+bool find(_Atomic(Node*) *head_ptr, int data, Node** pred_ptr, Node** cur_ptr) {
+retry: { // Block to stop compiler warning (and in case lab machines are running old C)
+    Node* pred = atomic_load(head_ptr);
+    if (pred == NULL) {
+        *pred_ptr = NULL;
+        *cur_ptr = NULL;
+        return false;
+    }
+    
+    Node* cur = atomic_load(&pred->next);
+    
+    while (cur != NULL) {
+        Node* succ = atomic_load(&cur->next);
+        
+        // Check if current node is marked
+        if (atomic_load(&cur->marked)) {
+            // Try to physically remove the logically deleted node
+            if (!atomic_compare_exchange_strong(&pred->next, &cur, succ)) {
+                // CAS failed, retry from the beginning
+                goto retry;
+            }
+            cur = succ;
+        } else {
+            if (cur->data >= data) {
+                *pred_ptr = pred;
+                *cur_ptr = cur;
+                return cur->data == data;
+            }
+            pred = cur;
+            cur = succ;
         }
+    }
+    
+    *pred_ptr = pred;
+    *cur_ptr = NULL;
+    return false;
     }
 }
 
 /**
  * Deletes a given node
+ * Deletes logically first then for real
  */
-
-
-// should this be a bool to return success or failure?
-void delete_node(Node **head_ref, int data) {
-    Node *head = *head_ref;
-    if (head == NULL) { // empty list
-        return;
-    }
-
-    if (head->data == data) { // delete head
-        Node *temp = head;
-        *head_ref  = head->next;   // update head while locked
-        free(temp);
-        return;
-    }
-    Node *prev = head;
-    Node *cur  = head->next;
-
-    while (cur != NULL && cur->data != data) {
-        prev = cur;
-        cur  = cur->next;
-    }
-
-    if (cur != NULL) {
-        if(nodes_safe(prev, cur)){
-            if (cur->data == data){
-                cur->marked = 1;
-                prev->next = cur->next;
-                free(cur);
-                return; // success
-            }
-            else{
-                return; // failure
-            }
-        }
-    }
-
-    return;           // failure
-}
-
-/**
- * Returns a given node
- */
-Node* search(Node* head, int data) {
-    Node* cur = head;
-    while (cur != NULL) {
-        if (cur->data == data) {
-            return cur;
-        }
-        cur = cur->next;
+bool delete_node(_Atomic(Node*) *head_ptr, int data) {
+    Node* head = atomic_load(head_ptr);
+    if (head == NULL) {
+        printf("empty list\n");
+        return false;
     }
     
-    return NULL;    
-}
-
-/**
- * Checks if a value exists in the list
- */
-bool contains(Node* head, int data) {
-    Node* target = search(head, data);
-    if (target == NULL)
+    // Special case for head
+    if (head->data == data) {
+        bool expected = false; // Try to mark the head for deletion
+        if (atomic_compare_exchange_strong(&head->marked, &expected, true)) {
+            Node* next = atomic_load(&head->next); // Try to atomically replace the head
+            if (atomic_compare_exchange_strong(head_ptr, &head, next)) {
+                free(head);
+            }
+            return true;
+        }
         return false;
-    return !target->marked; // if target is marked, we consider it missing
+    }
+    
+    Node* pred;
+    Node* cur;
+    bool found;
+    
+    while (true) {
+        found = find(head_ptr, data, &pred, &cur);
+        if (!found || cur == NULL) {
+            printf("delete: value %d not found\n", data);
+            return false;
+        }
+        
+        bool expected = false; // Try to mark the node for deletion
+        if (!atomic_compare_exchange_strong(&cur->marked, &expected, true)) {
+            continue; // Already marked or cas failed, retry
+        } // Node is now logically deleted
+
+        Node* succ = atomic_load(&cur->next); // Update next pointer to physically remove the node
+        if (atomic_compare_exchange_strong(&pred->next, &cur, succ)) {
+            free(cur);
+        }
+        // If cas fail, the loop will call find() again to ensure deletion
+        return true;
+    }
 }
 
 /**
- * Prints list contents
+ * Wait-free return a node with a given value
  */
-void print_list(Node* head) {
+Node* search(_Atomic(Node*) *head_ptr, int data) {
+    Node* cur = atomic_load(head_ptr);
+    while (cur != NULL) {
+        if (!atomic_load(&cur->marked) && cur->data == data) {
+            return cur;
+        }
+        cur = atomic_load(&cur->next);
+    }
+    return NULL;
+}
+
+/**
+ * Wait-free check if a value exists in the list
+ */
+bool contains(_Atomic(Node*) *head_ptr, int data) {
+    return search(head_ptr, data) != NULL;
+}
+
+/**
+ * Wait-free print list contents
+ */
+void print_list(_Atomic(Node*) *head_ptr) {
+    Node* head = atomic_load(head_ptr);
     if (head == NULL) {
         printf("empty list\n");
         return;
@@ -134,21 +166,25 @@ void print_list(Node* head) {
     Node* cur = head;
     printf("List: ");
     while (cur != NULL) {
-        printf("%d -> ", cur->data);
-        cur = cur->next;
+        if (!atomic_load(&cur->marked)) {
+            printf("%d -> ", cur->data);
+        }
+        cur = atomic_load(&cur->next);
     }
     printf("END\n");
 }
 
 /**
- * Count nodes in list
+ * Wait-free count nodes in list
  */
-int count_nodes(Node* head) {
+int count_nodes(_Atomic(Node*) *head_ptr) {
     int count = 0;
-    Node* cur = head;
+    Node* cur = atomic_load(head_ptr);
     while (cur != NULL) {
-        count++;
-        cur = cur->next;
+        if (!atomic_load(&cur->marked)) { // Don't count logically deleted nodes
+            count++;
+        }
+        cur = atomic_load(&cur->next);
     }
     return count;
 }
@@ -156,13 +192,14 @@ int count_nodes(Node* head) {
 /**
  * Free memory used by the list
  */
-void free_list(Node* head) {
-    Node* current = head;
+void free_list(_Atomic(Node*) *head_ptr) {
+    Node* cur = atomic_load(head_ptr);
     Node* next;
     
-    while (current != NULL) {
-        next = current->next;
-        free(current);
-        current = next;
+    while (cur != NULL) {
+        next = atomic_load(&cur->next);
+        free(cur);
+        cur = next;
     }
+    atomic_store(head_ptr, NULL);
 }

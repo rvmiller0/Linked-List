@@ -126,12 +126,9 @@ bool verify_list() {
     printf("verifying integrity...\n");
     bool result = true;
     
-    // First, count actual nodes in the list
-    int actual_count = count_nodes(head);
-    
-    // Get expected count from our tracking
-    int expected_count = get_expected_count();
-    
+    int actual_count = count_nodes(head); // Count actual nodes in list
+    int expected_count = get_expected_count(); // Get expected count from tracker
+
     // Compare counts first
     printf("node counts: actual=%d, expected=%d\n", actual_count, expected_count);
     if (actual_count != expected_count) {
@@ -139,10 +136,9 @@ bool verify_list() {
         result = false;
     }
     
-    // Now check each expected value is in the list the correct number of times
     pthread_mutex_lock(&expected_mutex);
     
-    // 1. Count occurrences of each value in the list
+    // Count occurrences of each value in list
     int* list_counts = calloc(BUCKET_SIZE, sizeof(int));
     if (list_counts == NULL) {
         perror("calloc failed for list_counts");
@@ -163,7 +159,7 @@ bool verify_list() {
     }
     pthread_rwlock_unlock(&list_rwlock);
     
-    // 2. Compare with expected counts
+    // Compare with expected
     for (int i = 0; i < BUCKET_SIZE; i++) {
         int expected = expected_values[i].used ? expected_values[i].count : 0;
         if (list_counts[i] != expected) {
@@ -184,9 +180,7 @@ bool verify_list() {
  */
 int main() {
     srand(time(NULL)); // Initialize random seed
-
-    // Initialize expected values array
-    init_expected_values();
+    init_expected_values(); // Initialize expected values array
     
     // Create threads
     pthread_t threads[NUM_THREADS];
@@ -214,7 +208,7 @@ int main() {
     
     printf("all threads complete\n");
     
-    // Print the final list
+    // Print final list
     printf("Final ");
     print_list(head);
     
