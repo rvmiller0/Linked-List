@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
+#include <stdbool.h>
 
 typedef struct Node {
     int data;
@@ -23,46 +25,45 @@ Node* create_node(int data) {
 /**
  * Insert a node at the first position
  */
-Node* insert(Node* head, int data) {
-    Node* new_node = create_node(data);
-    new_node->next = head;
-    return new_node;
+void insert_node(Node** head_ref, int data) {
+    Node *new_node = create_node(data);
+    new_node->next = *head_ref;
+    *head_ref      = new_node;   // update head while still locked - important!
 }
 
 /**
  * Deletes a given node
  */
-Node* delete_node(Node* head, int data) {
-    if (head == NULL) {
-        printf("empty list\n");
-        return NULL;
+void delete_node(Node **head_ref, int data) {
+    Node *head = *head_ref;
+    if (head == NULL) { // empty list
+        return;
     }
-    if (head->data == data) {
-        Node* temp = head;
-        head = head->next;
+
+    if (head->data == data) { // delete head
+
+        Node *temp = head;
+        *head_ref  = head->next;   // update head while locked
         free(temp);
-        return head;
+        return;
     }
-    Node* cur = head;
-    Node* prev = NULL;
+    Node *prev = head;
+    Node *cur  = head->next;
 
     while (cur != NULL && cur->data != data) {
         prev = cur;
-        cur = cur->next;
+        cur  = cur->next;
     }
 
-    if (cur == NULL) {
-        printf("dnf\n");
-        return head;
+    if (cur != NULL) {
+        prev->next = cur->next;
+        free(cur);
     }
-
-    prev->next = cur->next;
-    free(cur);
-    return(head);
 }
 
 /**
- * Returns a given node
+ * Returns a given node, uses read lock instead of write lock
+ * since it doesn't modify the list
  */
 Node* search(Node* head, int data) {
     Node* cur = head;
@@ -72,15 +73,23 @@ Node* search(Node* head, int data) {
         }
         cur = cur->next;
     }
+    
     return NULL;    
+}
+
+/**
+ * Checks if a value exists in the list
+ */
+bool contains(Node* head, int data) {
+    return search(head, data) != NULL;
 }
 
 /**
  * Prints list contents
  */
-void printLL(struct Node* head){
+void print_list(Node* head) {
     if (head == NULL) {
-        printf("empty list");
+        printf("empty list\n");
         return;
     }
 
@@ -90,18 +99,32 @@ void printLL(struct Node* head){
         printf("%d -> ", cur->data);
         cur = cur->next;
     }
-    printf("endL\n");
+    printf("END\n");
 }
 
 /**
- * Tests list
+ * Count nodes in list
  */
-int main(){
-    Node* head = NULL;
+int count_nodes(Node* head) {
+    int count = 0;
+    Node* cur = head;
+    while (cur != NULL) {
+        count++;
+        cur = cur->next;
+    }
+    return count;
+}
 
-    head = insert(head, 20);
-    head = insert(head, 15);
-    head = insert(head, 10);
-    head = insert(head, 5);
-    printLL(head);
+/**
+ * Free memory used by the list
+ */
+void free_list(Node* head) {
+    Node* current = head;
+    Node* next;
+    
+    while (current != NULL) {
+        next = current->next;
+        free(current);
+        current = next;
+    }
 }
